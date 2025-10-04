@@ -26,18 +26,24 @@ from model import (
 st.set_page_config(page_title="Auto-EDA + Model Starter", layout="wide")
 
 # --- Cache helpers ---
+
+
 @st.cache_data(show_spinner=False)
 def _read_csv(file, **kwargs):
     return pd.read_csv(file, **kwargs)
 
+
 # --- Sidebar ---
 with st.sidebar:
     st.markdown("### Auto-EDA + Model Starter")
-    st.caption("Upload a CSV or try a sample dataset. Explore EDA → train baselines → export a quick report.")
-    sample = st.selectbox("Sample dataset", ["(none)", "Iris", "Titanic", "California Housing"], index=0)
+    st.caption(
+        "Upload a CSV or try a sample dataset. Explore EDA → train baselines → export a quick report.")
+    sample = st.selectbox(
+        "Sample dataset", ["(none)", "Iris", "Titanic", "California Housing"], index=0)
     theme = st.radio("Theme", ["Minimal", "Neon", "Terminal"], index=0)
     st.divider()
-    st.caption("Tip: Large datasets are auto-sampled for plots to keep things snappy.")
+    st.caption(
+        "Tip: Large datasets are auto-sampled for plots to keep things snappy.")
 
 # --- Home tab: upload / load data ---
 tab_home, tab_eda, tab_model = st.tabs(["Home", "EDA", "Model"])
@@ -65,7 +71,8 @@ with tab_home:
     if df is None:
         st.info("Upload a CSV or choose a sample dataset from the sidebar.")
     else:
-        st.success(f"Loaded data with shape {df.shape[0]} rows × {df.shape[1]} columns.")
+        st.success(
+            f"Loaded data with shape {df.shape[0]} rows × {df.shape[1]} columns.")
         st.dataframe(df.head(20), use_container_width=True)
         coltypes = infer_column_types(df)
         with st.expander("Inferred column types"):
@@ -84,7 +91,8 @@ with tab_eda:
         sampled = safe_sample(df)
 
         # Target selection (optional in EDA tab)
-        target = st.selectbox("Optional target column", ["(none)"] + list(df.columns), index=0)
+        target = st.selectbox("Optional target column", [
+                              "(none)"] + list(df.columns), index=0)
         target = None if target == "(none)" else target
 
         c1, c2 = st.columns([2, 1])

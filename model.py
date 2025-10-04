@@ -5,6 +5,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit as st
+import warnings
 
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
@@ -19,8 +20,19 @@ from sklearn.metrics import (
 
 from sklearn.linear_model import LogisticRegression, LinearRegression
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
+try:
+    from lightgbm import LGBMClassifier, LGBMRegressor
+    _HAS_LGBM = True
+except Exception:
+    _HAS_LGBM = False
 
 from utils import bytes_from_model
+try:
+    import shap
+    _HAS_SHAP = True
+except Exception:
+    _HAS_SHAP = False
+
 
 def detect_task_type(df: pd.DataFrame, target: str, coltypes: Dict[str, List[str]]) -> str:
     """Return 'classification' or 'regression'."""
@@ -31,14 +43,17 @@ def detect_task_type(df: pd.DataFrame, target: str, coltypes: Dict[str, List[str
         return "regression"
     return "classification"
 
+
 def _split_Xy(df: pd.DataFrame, target: str):
     X = df.drop(columns=[target])
     y = df[target]
     return X, y
 
-def _build_preprocess(coltypes: Dict[str, List[str]]):
-    num = coltypes["numeric"]
-    cat = coltypes["categorical"]
+def _build_preprocess(coltypes: Dict[str, List[str]], available_cols: List[str]):
+    """Build a ColumnTransformer using only columns that actually exist in X."""
+    # Intersect inferred types with the columns present in X
+    num = [c for c in coltypes.get("numeric", []) if c in available_cols]
+    cat = [c for c in coltypes.get("categorical", []) if c in available_cols]
 
     num_pipe = Pipeline([
         ("imputer", SimpleImputer(strategy="median")),
@@ -48,21 +63,30 @@ def _build_preprocess(coltypes: Dict[str, List[str]]):
         ("imputer", SimpleImputer(strategy="most_frequent")),
         ("ohe", OneHotEncoder(handle_unknown="ignore")),
     ])
+
+    transformers = []
+    if num:
+        transformers.append(("num", num_pipe, num))
+    if cat:
+        transformers.append(("cat", cat_pipe, cat))
+
+    # If no usable columns, still return a CT (it will drop all features).
+    # In practice, with Iris or most datasets, you'll have at least numeric.
     pre = ColumnTransformer(
-        transformers=[
-            ("num", num_pipe, [c for c in num if c not in []]),
-            ("cat", cat_pipe, [c for c in cat if c not in []]),
-        ],
+        transformers=transformers,
         remainder="drop",
         sparse_threshold=0.3,
     )
     return pre
+
 
 def _train_classification(X_train, X_test, y_train, y_test, pre):
     models = {
         "LogisticRegression": LogisticRegression(max_iter=1000),
         "RandomForestClassifier": RandomForestClassifier(random_state=42),
     }
+    if _HAS_LGBM:
+        models["LGBMClassifier"] = LGBMClassifier(random_state=42)
     metrics = {}
     trained = {}
     importances = {}
@@ -98,11 +122,14 @@ def _train_classification(X_train, X_test, y_train, y_test, pre):
 
     return trained, metrics, importances
 
+
 def _train_regression(X_train, X_test, y_train, y_test, pre):
     models = {
         "LinearRegression": LinearRegression(),
         "RandomForestRegressor": RandomForestRegressor(random_state=42),
     }
+    if _HAS_LGBM:
+        models["LGBMRegressor"] = LGBMRegressor(random_state=42)
     metrics = {}
     trained = {}
     importances = {}
@@ -129,6 +156,7 @@ def _train_regression(X_train, X_test, y_train, y_test, pre):
 
     return trained, metrics, importances
 
+
 def train_baselines(df: pd.DataFrame, target: str, task: str, coltypes: Dict[str, List[str]]):
     X, y = _split_Xy(df, target)
     # Ensure target is suitable for classification
@@ -137,33 +165,53 @@ def train_baselines(df: pd.DataFrame, target: str, task: str, coltypes: Dict[str
     X_train, X_test, y_train, y_test = train_test_split(
         X, y, test_size=0.2, random_state=42, stratify=stratify
     )
-    pre = _build_preprocess(coltypes)
+
+    coltypes_features = {
+        "numeric":     [c for c in coltypes.get("numeric", []) if c != target],
+        "categorical": [c for c in coltypes.get("categorical", []) if c != target],
+        "datetime":    [c for c in coltypes.get("datetime", []) if c != target],
+        "text":        [c for c in coltypes.get("text", []) if c != target],
+    }
+
+    pre = _build_preprocess(coltypes_features, X_train.columns.tolist())
 
     if task == "classification":
-        trained, metrics, importances = _train_classification(X_train, X_test, y_train, y_test, pre)
+        trained, metrics, importances = _train_classification(
+            X_train, X_test, y_train, y_test, pre)
     else:
-        trained, metrics, importances = _train_regression(X_train, X_test, y_train, y_test, pre)
+        trained, metrics, importances = _train_regression(
+            X_train, X_test, y_train, y_test, pre)
 
     # Build comparison table
     rows = []
     if task == "classification":
         for k, m in metrics.items():
-            rows.append({"model": k, "accuracy": m.get("accuracy"), "f1": m.get("f1"), "roc_auc": m.get("roc_auc")})
-        cmp_df = pd.DataFrame(rows).sort_values(["f1", "accuracy"], ascending=False, na_position="last")
+            rows.append({"model": k, "accuracy": m.get("accuracy"),
+                        "f1": m.get("f1"), "roc_auc": m.get("roc_auc")})
+        cmp_df = pd.DataFrame(rows).sort_values(
+            ["f1", "accuracy"], ascending=False, na_position="last")
     else:
         for k, m in metrics.items():
-            rows.append({"model": k, "r2": m.get("r2"), "mae": m.get("mae"), "rmse": m.get("rmse")})
+            rows.append({"model": k, "r2": m.get("r2"),
+                        "mae": m.get("mae"), "rmse": m.get("rmse")})
         cmp_df = pd.DataFrame(rows).sort_values(["r2"], ascending=False)
 
     # Serialize models to bytes for download
-    model_bytes = {name: bytes_from_model(model) for name, model in trained.items()}
+    model_bytes = {name: bytes_from_model(model)
+                   for name, model in trained.items()}
 
     # Prepare some plot figs for report
     figs_for_report = []
     if task == "classification":
-        figs_for_report.extend(_make_classification_report_figs(trained, X_test, y_test))
+        figs_for_report.extend(
+            _make_classification_report_figs(trained, X_test, y_test))
     else:
-        figs_for_report.extend(_make_regression_report_figs(trained, X_test, y_test))
+        figs_for_report.extend(
+            _make_regression_report_figs(trained, X_test, y_test))
+
+    # Attach SHAP figs (optional, tree models only, small sample)
+    shap_figs = _maybe_make_shap_figs(trained, X_test, task)
+    figs_for_report.extend(shap_figs)
 
     return {
         "trained": trained,
@@ -174,16 +222,20 @@ def train_baselines(df: pd.DataFrame, target: str, task: str, coltypes: Dict[str
         "model_bytes": model_bytes,
     }
 
+
 def best_model_from_metrics(metrics: dict, task: str) -> str:
     if task == "classification":
         # prioritize F1, fall back to accuracy
-        best = max(metrics.items(), key=lambda kv: (kv[1].get("f1", -1), kv[1].get("accuracy", -1)))
+        best = max(metrics.items(), key=lambda kv: (
+            kv[1].get("f1", -1), kv[1].get("accuracy", -1)))
         return best[0]
     else:
-        best = max(metrics.items(), key=lambda kv: (kv[1].get("r2", -1), -kv[1].get("rmse", 1e9)))
+        best = max(metrics.items(), key=lambda kv: (
+            kv[1].get("r2", -1), -kv[1].get("rmse", 1e9)))
         return best[0]
 
 # ---------- Plots rendered in Streamlit ----------
+
 
 def render_classification_plots(results: dict):
     st.subheader("Classification diagnostics")
@@ -195,11 +247,17 @@ def render_classification_plots(results: dict):
     if results.get("figs_for_report"):
         for fig in results["figs_for_report"]:
             st.pyplot(fig, use_container_width=True)
+    if _HAS_SHAP:
+        st.caption("Includes SHAP plots when a tree model is available.")
+
     else:
         st.caption("No diagnostic plots were generated.")
 
+
 def render_regression_plots(results: dict):
     st.subheader("Regression diagnostics")
+    if _HAS_SHAP:
+        st.caption("Includes SHAP plots when a tree model is available.")
     if results.get("figs_for_report"):
         for fig in results["figs_for_report"]:
             st.pyplot(fig, use_container_width=True)
@@ -207,6 +265,7 @@ def render_regression_plots(results: dict):
         st.caption("No diagnostic plots were generated.")
 
 # ---------- Internal helpers to make figs we can both show & export ----------
+
 
 def _make_classification_report_figs(trained: dict, X_test, y_test):
     figs = []
@@ -246,6 +305,7 @@ def _make_classification_report_figs(trained: dict, X_test, y_test):
 
     return figs
 
+
 def _make_regression_report_figs(trained: dict, X_test, y_test):
     figs = []
     model = trained.get("RandomForestRegressor", next(iter(trained.values())))
@@ -267,4 +327,42 @@ def _make_regression_report_figs(trained: dict, X_test, y_test):
     ax.set_title("Residuals histogram")
     figs.append(fig_hist)
 
+    return figs
+
+
+def _maybe_make_shap_figs(trained: dict, X_test, task: str):
+    """Return a list of matplotlib figs with SHAP summaries if available."""
+    figs = []
+    if not _HAS_SHAP:
+        return figs
+    # Prefer LightGBM, then RF
+    est_name = "LGBMClassifier" if task == "classification" else "LGBMRegressor"
+    fallback = "RandomForestClassifier" if task == "classification" else "RandomForestRegressor"
+    model = trained.get(est_name) or trained.get(fallback)
+    if model is None:
+        return figs
+    # Pull the fitted estimator (after ColumnTransformer). SHAP expects numeric matrix.
+    try:
+        # Use predict_proba for classification explainer if binary; otherwise default
+        # For speed, sample test rows
+        import numpy as np
+        idx = np.random.RandomState(42).choice(
+            len(X_test), size=min(200, len(X_test)), replace=False)
+        Xs = X_test.iloc[idx]
+        # Get the transformed matrix
+        pre = model.named_steps["pre"]
+        Xt = pre.transform(Xs)
+        est = model.named_steps["est"]
+        explainer = shap.Explainer(est, Xt)
+        shap_values = explainer(Xt)
+        # Matplotlib summary plot (bar)
+        fig1 = shap.plots.bar(shap_values, show=False)
+        figs.append(fig1)
+        # Beeswarm (if small)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            fig2 = shap.plots.beeswarm(shap_values, show=False)
+            figs.append(fig2)
+    except Exception:
+        pass
     return figs
