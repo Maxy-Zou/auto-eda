@@ -1,0 +1,24 @@
+# Byte-compiled / cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# Streamlit & local settings
+.streamlit/
+
+# macOS metadata
+.DS_Store
+
+# Reports and model artifacts
+*.pkl
+*.html
+
+# Logs / temporary files
+*.log
+*.tmp
