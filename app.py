@@ -36,14 +36,13 @@ def _read_csv(file, **kwargs):
 # --- Sidebar ---
 with st.sidebar:
     st.markdown("### Auto-EDA + Model Starter")
-    st.caption(
-        "Upload a CSV or try a sample dataset. Explore EDA → train baselines → export a quick report.")
-    sample = st.selectbox(
-        "Sample dataset", ["(none)", "Iris", "Titanic", "California Housing"], index=0)
+    st.info("Built by Max Zou. Upload a CSV → explore → model → explain.")
+    st.caption("Upload a CSV or try a sample dataset. Explore EDA → train baselines → export a quick report.")
+    sample = st.selectbox("Sample dataset", ["(none)", "Iris", "Titanic", "California Housing"], index=0)
     theme = st.radio("Theme", ["Minimal", "Neon", "Terminal"], index=0)
     st.divider()
-    st.caption(
-        "Tip: Large datasets are auto-sampled for plots to keep things snappy.")
+    st.caption("Tip: Large datasets are auto-sampled for plots to keep things snappy.")
+
 
 # --- Home tab: upload / load data ---
 tab_home, tab_eda, tab_model = st.tabs(["Home", "EDA", "Model"])
@@ -71,15 +70,18 @@ with tab_home:
     if df is None:
         st.info("Upload a CSV or choose a sample dataset from the sidebar.")
     else:
-        st.success(
-            f"Loaded data with shape {df.shape[0]} rows × {df.shape[1]} columns.")
+        st.success(f"Loaded data with shape {df.shape[0]} rows × {df.shape[1]} columns.")
         st.dataframe(df.head(20), use_container_width=True)
         coltypes = infer_column_types(df)
         with st.expander("Inferred column types"):
             st.json(coltypes)
 
+        st.write("### Summary statistics")
+        st.write(df.describe(include='all').transpose())
+
         st.session_state["__DATAFRAME__"] = df
         st.session_state["__COLTYPES__"] = coltypes
+
 
 with tab_eda:
     st.header("Exploratory Data Analysis")
@@ -133,6 +135,17 @@ with tab_model:
             else:
                 render_regression_plots(results)
 
+            # Feature importances (Random Forest if available)
+            imp = None
+            if task == "classification":
+                imp = results["importances"].get("RandomForestClassifier")
+            else:
+                imp = results["importances"].get("RandomForestRegressor")
+            if imp is not None:
+                import pandas as pd
+                st.subheader("Feature importances (Random Forest)")
+                st.bar_chart(pd.Series(imp))
+
             # Export best
             best_name = best_model_from_metrics(results["metrics"], task)
             st.success(f"Best model: **{best_name}**")
@@ -143,6 +156,18 @@ with tab_model:
             key_plots_b64 = []
             for fig in results.get("figs_for_report", []):
                 key_plots_b64.append(fig_to_png_base64(fig))
+
+            # Download all trained models
+            with st.expander("Download all trained models"):
+                for name, blob in results["model_bytes"].items():
+                    st.download_button(
+                        f"Download {name} (.pkl)",
+                        data=blob,
+                        file_name=f"{name}.pkl",
+                        mime="application/octet-stream",
+                        key=f"dl_{name}"
+                    )
+
 
             report_html = build_report_html(
                 dataset_summary={
